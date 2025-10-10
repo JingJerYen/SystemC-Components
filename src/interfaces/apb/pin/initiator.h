@@ -88,14 +88,13 @@ initiator<DATA_WIDTH, ADDR_WIDTH>::initiator(const sc_core::sc_module_name& nm)
 }
 
 template <unsigned DATA_WIDTH, unsigned ADDR_WIDTH> inline void initiator<DATA_WIDTH, ADDR_WIDTH>::bus_task() {
-    auto& hready = PREADY_i.read();
     while(true) {
         wait(inqueue.get_event());
         while(auto trans = inqueue.get_next_transaction()) {
             auto addr_offset = trans->get_address() & (DATA_WIDTH / 8 - 1);
             auto upper = addr_offset + trans->get_data_length();
-            if(!PSTRB_o.get_interface() && addr_offset && upper != (DATA_WIDTH / 8)) {
-                SCCERR(SCMOD) << "Narrow accesses are not supported as there is no PSTRB signal! Skipping " << *trans;
+            if(!PSTRB_o.get_interface() && (addr_offset || upper != (DATA_WIDTH / 8))) {
+                SCCERR(SCMOD) << "Narrow accesses are not supported before APB4 as there is no PSTRB signal! Skipping " << *trans;
                 tlm::tlm_phase phase{tlm::END_RESP};
                 sc_core::sc_time delay;
                 trans->set_response_status(tlm::TLM_GENERIC_ERROR_RESPONSE);
@@ -108,27 +107,22 @@ template <unsigned DATA_WIDTH, unsigned ADDR_WIDTH> inline void initiator<DATA_W
                 tsckt->nb_transport_bw(*trans, phase, delay);
             } else {
                 SCCDEBUG(SCMOD) << "Recv beg req for read to addr 0x" << std::hex << trans->get_address() << ", starting APB setup phase, ";
-                auto bytes_exp = scc::ilog2(trans->get_data_length());
-                auto width_exp = scc::ilog2(DATA_WIDTH / 8);
-                size_t size = 0;
-                for(; size < bytes_exp; ++size)
-                    if(trans->get_address() & (1 << size))
-                        break; // i contains the first bit not being 0
                 auto* ext = trans->template get_extension<apb_extension>();
                 if(trans->is_write()) {
-                    if(upper <= DATA_WIDTH / 8) {
-                        data_t data{0};
-                        strb_t strb{0};
-                        for(size_t i = 0; i < upper; ++i) {
-                            if(i >= addr_offset) {
-                                data.range(i * 8 + 7, i * 8) = *(trans->get_data_ptr() + i - addr_offset);
-                                strb[i] = 1;
-                            }
+                    data_t data{0};
+                    strb_t strb{0};
+                    for(size_t i = 0; i < upper; ++i) {
+                        if(i >= addr_offset) {
+                            data.range(i * 8 + 7, i * 8) = *(trans->get_data_ptr() + i - addr_offset);
+                            strb[i] = 1;
                         }
-                        PWDATA_o.write(data);
-                        if(PSTRB_o.get_interface())
-                            PSTRB_o.write(strb);
                     }
+                    PWDATA_o.write(data);
+                    if(PSTRB_o.get_interface())
+                        PSTRB_o.write(strb);
+                } else if(PSTRB_o.get_interface()) {
+                    // From spec : For read transfers the bus master must drive all bits of PSTRB LOW
+                    PSTRB_o.write(0);
                 }
                 PWRITE_o.write(trans->is_write());
                 PADDR_o.write(trans->get_address() - addr_offset); // adjust address to be aligned
